@@ -29,6 +29,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 
@@ -155,10 +156,12 @@ func writeIosrvSuper(path string, super *iosrvSuper) error {
 //
 // NOTE: The superblock supercedes the format-time configuration in config.
 type iosrv struct {
-	super  *iosrvSuper
-	config *configuration
-	index  int
-	cmd    *exec.Cmd
+	super   *iosrvSuper
+	config  *configuration
+	index   int
+	cmd     *exec.Cmd
+	sigchld chan os.Signal
+	ready   chan struct{}
 }
 
 func newIosrv(config *configuration, i int) (*iosrv, error) {
@@ -168,9 +171,11 @@ func newIosrv(config *configuration, i int) (*iosrv, error) {
 	}
 
 	srv := &iosrv{
-		super:  super,
-		config: config,
-		index:  i,
+		super:   super,
+		config:  config,
+		index:   i,
+		sigchld: make(chan os.Signal, 1),
+		ready:   make(chan struct{}),
 	}
 
 	return srv, nil
@@ -187,6 +192,13 @@ func (srv *iosrv) start() (err error) {
 			srv.stopCmd()
 		}
 	}()
+
+	// Wait for the notifyReady request or the SIGCHLD from the I/O server.
+	select {
+	case <-srv.ready:
+	case <-srv.sigchld:
+		return errors.New("received SIGCHLD")
+	}
 
 	// TODO:
 	//   1 Get the rank and send a SetRank request to the I/O server.
@@ -218,6 +230,8 @@ func (srv *iosrv) startCmd() error {
 	srv.cmd.SysProcAttr = &syscall.SysProcAttr{
 		Pdeathsig: syscall.SIGKILL,
 	}
+
+	signal.Notify(srv.sigchld, syscall.SIGCHLD)
 
 	// Start the DAOS I/O server.
 	err := srv.cmd.Start()
